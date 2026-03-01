@@ -1,0 +1,499 @@
+// packages/database/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════
+// USERS & AUTH
+// ═══════════════════════════════════════════
+
+enum UserRole {
+  AGENT
+  ADMIN
+  OPERATIONS
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      UserRole @default(AGENT)
+  isActive  Boolean  @default(true)
+  
+  // Fee waiver permission (NEW)
+  canWaiverFees Boolean @default(false)  // Only some agents can waive fees
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  leads     Lead[]
+  clients   Client[]
+  quotes    Quote[]
+  
+  @@index([email])
+  @@index([role])
+  @@map("users")
+}
+
+// ═══════════════════════════════════════════
+// LEADS
+// ═══════════════════════════════════════════
+
+enum LeadStage {
+  NEW
+  CONTACTED
+  MEETING_SCHEDULED
+  PROPOSAL_SENT
+  WON
+  LOST
+  NURTURE
+}
+
+enum LeadSource {
+  WEB
+  REFERRAL
+  LINKEDIN
+  EVENT
+  COLD_CALL
+  OTHER
+}
+
+enum LeadPriority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+model Lead {
+  id          String       @id @default(uuid())
+  
+  // Basic Info
+  name        String
+  email       String
+  phone       String?
+  
+  // Metadata
+  source      LeadSource
+  stage       LeadStage    @default(NEW)
+  priority    LeadPriority @default(MEDIUM)
+  score       Int          @default(0)
+  
+  // Ownership
+  agentId     String
+  agent       User         @relation(fields: [agentId], references: [id])
+  
+  // Timestamps
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  lastContact DateTime?
+  
+  notes       String?      @db.Text
+  
+  @@index([agentId])
+  @@index([stage])
+  @@index([score])
+  @@map("leads")
+}
+
+// ═══════════════════════════════════════════
+// CLIENTS
+// ═══════════════════════════════════════════
+
+model Client {
+  id            String    @id @default(uuid())
+  
+  // Personal Info
+  name          String
+  email         String    @unique
+  phone         String?
+  dni           String?
+  dateOfBirth   DateTime?
+  
+  // Ownership
+  agentId       String
+  agent         User      @relation(fields: [agentId], references: [id])
+  
+  // Financial Info
+  annualIncome  Decimal?  @db.Decimal(12, 2)
+  netWorth      Decimal?  @db.Decimal(12, 2)
+  
+  // Conversion tracking (NEW MODEL)
+  convertedFromLeadId String?   @unique  // Traceability to original lead
+  firstQuoteId        String?   @unique  // First quote that converted lead to client
+  convertedAt         DateTime?          // When lead became client
+  
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  suitabilityTests SuitabilityTest[]
+  quotes           Quote[]
+  contracts        Contract[]
+  
+  @@index([agentId])
+  @@index([email])
+  @@map("clients")
+}
+
+// ═══════════════════════════════════════════
+// SUITABILITY TEST (MiFID II)
+// ═══════════════════════════════════════════
+
+enum RiskProfile {
+  CONSERVATIVE
+  MODERATE
+  AGGRESSIVE
+}
+
+model SuitabilityTest {
+  id          String      @id @default(uuid())
+  
+  clientId    String
+  client      Client      @relation(fields: [clientId], references: [id])
+  
+  agentId     String
+  
+  // Results
+  riskProfile RiskProfile
+  riskScore   Int         // 1-10
+  
+  // Answers (stored as JSONB)
+  answers     Json
+  
+  // Validity
+  completedAt DateTime    @default(now())
+  validUntil  DateTime    // completedAt + 12 months
+  isCurrent   Boolean     @default(true)
+  
+  // Signature
+  clientSignatureUrl String?
+  clientIpAddress    String?
+  clientSignedAt     DateTime?
+  
+  createdAt   DateTime    @default(now())
+  
+  @@index([clientId, isCurrent])
+  @@map("suitability_tests")
+}
+
+// ═══════════════════════════════════════════
+// PARTNERS & PRODUCTS
+// ═══════════════════════════════════════════
+
+enum PartnerType {
+  INSURANCE
+  BROKER
+  FUND
+}
+
+model Partner {
+  id           String      @id @default(uuid())
+  name         String      @unique
+  partnerType  PartnerType
+  logoUrl      String?
+  contactEmail String?
+  contactPhone String?
+  isActive     Boolean     @default(true)
+  
+  // API Config (for future)
+  apiAvailable Boolean     @default(false)
+  apiConfig    Json?
+  
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  
+  // Relations
+  products     Product[]
+  
+  @@map("partners")
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  
+  partnerId   String
+  partner     Partner  @relation(fields: [partnerId], references: [id])
+  
+  name        String
+  productType String   // PLAN_PENSIONES, UNIT_LINK, PIAS, CUENTA_ASESORADA
+  description String?  @db.Text
+  
+  // Commercial Config
+  minInitialAmount  Decimal? @db.Decimal(12, 2)
+  maxInitialAmount  Decimal? @db.Decimal(12, 2)
+  minPeriodicAmount Decimal? @db.Decimal(12, 2)
+  allowedFractionation String[] // ['MENSUAL', 'TRIMESTRAL', 'ANUAL']
+  
+  // Consulting Fee (NEW MODEL - per product)
+  consultingFeeAmount Decimal  @db.Decimal(10, 2) @default(0)  // Fee for advising on this product
+  allowFeeFinancing   Boolean  @default(false)                 // Can this fee be paid in installments?
+  maxFeeInstallments  Int?                                     // Max number of installments allowed
+  
+  // Commissions
+  commissionUpfrontPct   Decimal? @db.Decimal(5, 2)
+  commissionRecurringPct Decimal? @db.Decimal(5, 2)
+  commissionConfig       Json?
+  
+  // Flags
+  isActive                     Boolean @default(true)
+  requiresMedicalQuestionnaire Boolean @default(false)
+  requiresFinancialPlanning    Boolean @default(false)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  fields ProductField[]
+  quotes Quote[]
+  
+  @@unique([partnerId, name])
+  @@index([partnerId])
+  @@index([isActive])
+  @@map("products")
+}
+
+model ProductField {
+  id          String  @id @default(uuid())
+  
+  productId   String
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  fieldName   String  // 'tomador_nombre', 'prima_inicial', etc.
+  fieldLabel  String  // User-friendly label
+  fieldType   String  // 'text', 'number', 'date', 'currency', 'select', etc.
+  
+  isRequired  Boolean @default(false)
+  displayOrder Int    @default(0)
+  fieldSection String? // 'TOMADOR', 'ASEGURADO', 'BENEFICIARIOS'
+  
+  // Validation
+  validationRules Json? // {min, max, pattern, etc.}
+  
+  // Options (for selects)
+  fieldOptions Json? // ["MENSUAL", "TRIMESTRAL"] or [{value, label}]
+  
+  // Behavior
+  defaultValue String?
+  helpText     String? @db.Text
+  placeholder  String?
+  
+  // Conditional display
+  conditionalDisplay Json?
+  
+  createdAt DateTime @default(now())
+  
+  @@unique([productId, fieldName])
+  @@index([productId, displayOrder])
+  @@map("product_fields")
+}
+
+// ═══════════════════════════════════════════
+// QUOTES & CONTRACTS
+// ═══════════════════════════════════════════
+
+enum QuoteStatus {
+  DRAFT
+  PENDING_FEE_PAYMENT      // NEW: Waiting for consulting fee payment
+  FEE_WAIVER_PENDING       // NEW: Fee waiver requested, awaiting ops approval
+  PENDING_SIGNATURE
+  SUBMITTED_TO_OPS
+  IN_PROGRESS
+  ISSUED
+  INCIDENCE
+  REJECTED
+  CANCELLED
+}
+
+enum FeeStatus {
+  PENDING_PAYMENT          // Fee not paid yet
+  PAID                     // Fee paid in full
+  FINANCED                 // Fee being paid in installments
+  WAIVED                   // Fee waived by agent
+  WAIVED_PENDING          // Waiver requested, awaiting approval
+  WAIVED_REJECTED         // Waiver rejected by ops
+}
+
+model Quote {
+  id          String      @id @default(uuid())
+  quoteNumber String      @unique // Q-2025-00123
+  
+  // References
+  clientId    String?     // NULL until lead converts to client
+  leadId      String?     // Reference to lead (before conversion)
+  client      Client?     @relation(fields: [clientId], references: [id])
+  
+  agentId     String
+  agent       User        @relation(fields: [agentId], references: [id])
+  
+  productId   String
+  product     Product     @relation(fields: [productId], references: [id])
+  
+  partnerId   String
+  
+  // Status
+  status      QuoteStatus @default(DRAFT)
+  
+  // ══════════════════════════════════════════════════════
+  // CONSULTING FEE MANAGEMENT (NEW MODEL)
+  // ══════════════════════════════════════════════════════
+  
+  // Fee Configuration
+  consultingFeeAmount      Decimal       @db.Decimal(10, 2)  // Amount from product config
+  feeStatus                FeeStatus     @default(PENDING_PAYMENT)
+  
+  // Payment Tracking (PAID)
+  stripeFeePaymentIntentId String?       // For single payment
+  feePaidAt                DateTime?     // When fully paid
+  
+  // Financing Tracking (FINANCED)
+  feeFinancingEnabled      Boolean       @default(false)
+  totalFeeInstallments     Int?          // e.g., 3
+  paidFeeInstallments      Int           @default(0)
+  feePayments              FeePayment[]  // Multiple installment payments
+  feeFullyPaidAt           DateTime?     // When all installments completed
+  
+  // Fee Waiver Management (WAIVED)
+  feeWaived                Boolean       @default(false)
+  feeWaiverReason          String?       @db.Text  // REQUIRED if waived
+  feeWaiverRequestedBy     String?       // agentId who requested
+  feeWaiverRequestedAt     DateTime?
+  feeWaiverApprovedBy      String?       // ops userId who approved
+  feeWaiverApprovedAt      DateTime?
+  feeWaiverRejectedBy      String?       // ops userId who rejected
+  feeWaiverRejectedAt      DateTime?
+  feeWaiverRejectionReason String?       @db.Text
+  
+  // ══════════════════════════════════════════════════════
+  // PRODUCT DATA
+  // ══════════════════════════════════════════════════════
+  
+  // Product data snapshot
+  productData Json        // All filled fields
+  
+  // Amounts
+  initialAmount  Decimal?  @db.Decimal(12, 2)
+  periodicAmount Decimal?  @db.Decimal(12, 2)
+  fractionation  String?
+  
+  // Commissions (calculated)
+  commissionUpfront   Decimal? @db.Decimal(10, 2)
+  commissionRecurring Decimal? @db.Decimal(10, 2)
+  commissionTotal     Decimal? @db.Decimal(10, 2)
+  
+  // Documents
+  quotePdfUrl         String?
+  signedProposalUrl   String?
+  
+  // Suitability validation
+  suitabilityTestId   String?
+  suitabilityValidated Boolean @default(false)
+  
+  // Partner integration
+  partnerQuoteId      String?
+  submittedToPartnerAt DateTime?
+  
+  // Operations fields
+  partnerPolicyNumber String?
+  policyIssueDate     DateTime?
+  policyCertificateUrl String?
+  incidenceReason     String? @db.Text
+  incidenceReportedBy String?
+  incidenceReportedAt DateTime?
+  assignedToOps       String?
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  expiresAt   DateTime? // Quote validity
+  issuedAt    DateTime? // When converted to policy
+  
+  @@index([clientId])
+  @@index([leadId])
+  @@index([agentId])
+  @@index([status])
+  @@index([feeStatus])
+  @@index([partnerId])
+  @@map("quotes")
+}
+
+// ══════════════════════════════════════════════════════
+// FEE PAYMENT INSTALLMENTS (NEW)
+// ══════════════════════════════════════════════════════
+
+model FeePayment {
+  id                    String   @id @default(uuid())
+  
+  quoteId               String
+  quote                 Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  
+  // Installment details
+  installmentNumber     Int      // 1, 2, 3...
+  totalInstallments     Int      // e.g., 3 total
+  amount                Decimal  @db.Decimal(10, 2)
+  
+  // Stripe tracking
+  stripePaymentIntentId String   @unique
+  status                String   // 'succeeded', 'pending', 'failed', 'canceled'
+  
+  // Timing
+  dueDate               DateTime?
+  paidAt                DateTime?
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  
+  @@index([quoteId])
+  @@index([status])
+  @@map("fee_payments")
+}
+
+model Contract {
+  id                String   @id @default(uuid())
+  
+  clientId          String
+  client            Client   @relation(fields: [clientId], references: [id])
+  agentId           String
+  quoteId           String   @unique
+  
+  partnerPolicyNumber String
+  productName       String
+  partnerName       String
+  
+  initialAmount     Decimal  @db.Decimal(12, 2)
+  periodicAmount    Decimal? @db.Decimal(12, 2)
+  
+  isActive          Boolean  @default(true)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([clientId])
+  @@index([agentId])
+  @@map("contracts")
+}
+
+// ═══════════════════════════════════════════
+// QUOTE STATUS HISTORY
+// ═══════════════════════════════════════════
+
+model QuoteStatusHistory {
+  id         String   @id @default(uuid())
+  quoteId    String
+  fromStatus String?
+  toStatus   String
+  changedBy  String?
+  notes      String?  @db.Text
+  changedAt  DateTime @default(now())
+  
+  @@index([quoteId])
+  @@map("quote_status_history")
+}
